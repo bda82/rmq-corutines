@@ -10,8 +10,12 @@ from src.router import Router
 
 from consumers.parse_consumer import start as start_parse_consumer
 
-
+LOG_FORMAT = ('%(levelname) -10s %(asctime)s %(name) -30s %(funcName) '
+              '-35s %(lineno) -5d: %(message)s')
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
+
+
 
 uvloop.install()
 

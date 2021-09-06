@@ -11,7 +11,7 @@ from src.config.config import Config
 LOG_FORMAT = ('%(levelname) -10s %(asctime)s %(name) -30s %(funcName) '
               '-35s %(lineno) -5d: %(message)s')
 LOGGER = logging.getLogger(__name__)
-
+logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
 
 class BaseConsumer:
     EXCHANGE = 'message'
@@ -19,7 +19,7 @@ class BaseConsumer:
     QUEUE = 'text'
     ROUTING_KEY = 'example.text'
 
-    def __init__(self, consumer_name):
+    def __init__(self, consumer_name, callback_function):
         self._logger = LOGGER
 
         self._config = Config().rmq
@@ -40,9 +40,10 @@ class BaseConsumer:
         self._closing = False
         self._consumer_tag = None
         self._consuming = False
-        # In production, experiment with higher prefetch values
-        # for higher consumer throughput
-        self._prefetch_count = 1
+
+        self._prefetch_count = self._config.prefetch_count
+
+        self._callback = callback_function
 
     def connect(self):
         self._logger.info(f'Connecting to RMQ in {self.consumer_name}')
@@ -138,3 +139,59 @@ class BaseConsumer:
         self._logger.info(f'QOS set to: {self._prefetch_count} in {self.consumer_name}')
         self.start_consuming()
 
+    def start_consuming(self):
+        self._logger.info(f'Issuing consumer related RPC commands in {self.consumer_name}')
+        self.add_on_cancel_callback()
+        self._consumer_tag = self._channel.basic_consume(
+            self.QUEUE, self.on_message)
+        self.was_consuming = True
+        self._consuming = True
+
+    def add_on_cancel_callback(self):
+        self._logger.info(f'Adding consumer cancellation callback in {self.consumer_name}')
+        self._channel.add_on_cancel_callback(self.on_consumer_cancelled)
+
+    def on_consumer_cancelled(self, method_frame):
+        self._logger.info(f'Consumer was cancelled remotely, shutting down {method_frame} in {self.consumer_name}')
+        if self._channel:
+            self._channel.close()
+
+    def on_message(self, _unused_channel, basic_deliver, properties, body):
+        self._logger.info(f'Received message # {basic_deliver.delivery_tag} from {properties.app_id}: {body} in {self.consumer_name}')
+        self._callback(body)
+        self.acknowledge_message(basic_deliver.delivery_tag)
+
+    def acknowledge_message(self, delivery_tag):
+        self._logger.info(f'Acknowledging message {delivery_tag} in {self.consumer_name}')
+        self._channel.basic_ack(delivery_tag)
+
+    def stop_consuming(self):
+        if self._channel:
+            self._logger.info(f'Sending a Basic.Cancel RPC command to RabbitMQ in {self.consumer_name}')
+            cb = functools.partial(
+                self.on_cancelok, userdata=self._consumer_tag)
+            self._channel.basic_cancel(self._consumer_tag, cb)
+
+    def on_cancelok(self, _unused_frame, userdata):
+        self._consuming = False
+        self._logger.info(f'RabbitMQ acknowledged the cancellation of the consumer: {userdata} in {self.consumer_name}')
+        self.close_channel()
+
+    def close_channel(self):
+        self._logger.info(f'Closing the channel in {self.consumer_name}')
+        self._channel.close()
+
+    def run(self):
+        self._connection = self.connect()
+        self._connection.ioloop.run_forever()
+
+    def stop(self):
+        if not self._closing:
+            self._closing = True
+            self._logger.info(f'Stopping in {self.consumer_name}')
+            if self._consuming:
+                self.stop_consuming()
+                self._connection.ioloop.run_forever()
+            else:
+                self._connection.ioloop.stop()
+            self._logger.info(f'Stopped in {self.consumer_name}')
